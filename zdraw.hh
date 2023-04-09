@@ -1,5 +1,6 @@
 #include <QGraphicsView>
 #include <vector>
+#include <QUdpSocket>
 
 typedef std::chrono::high_resolution_clock::time_point Time;
 Time now();
@@ -11,8 +12,12 @@ public:
 
     bool viewportEvent(QEvent *event) override;
     void onTimer();
+    void exportScaled();
 private:
-  std::vector<QGraphicsEllipseItem*> parts;
+  QUdpSocket socket;
+  std::vector<QGraphicsLineItem*> parts;
   std::vector<QPointF> points;
+  QGraphicsSimpleTextItem* text = nullptr;
   Time lastTouch;
+  int frameIndex = 0;
 };
