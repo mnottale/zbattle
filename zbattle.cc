@@ -48,6 +48,11 @@ enum class BuildingKind
   Catapult,
 };
 
+namespace C
+{
+  const int zombieSpawnIntervalMs = 2000;
+}
+
 template<typename T> class vector: public std::vector<T>
 {
 public:
@@ -56,12 +61,20 @@ public:
     std::swap((*this)[idx], (*this)[this->size()-1]);
     this->pop_back();
   }
+  void swapOut(T const& obj)
+  {
+    auto it = std::find(this->begin(), this->end(), obj);
+    if (it == this->end())
+      return;
+    auto idx = it - this->begin();
+    swapOut(idx);
+  }
 };
 
 template <typename T> class Grid
 {
 public:
-  Grid(int w, int h, int nAxisSubdivide);
+  Grid(int w, int h, double zoneSize);
   void add(T const& o);
   void remove(T const& o);
   void move(T const& o, double x, double y);
@@ -70,8 +83,13 @@ public:
   template<typename Cond>
   vector<T> around(double x, double y, double radius, Cond cond);
   template<typename Cond>
+  vector<T> aroundWide(double x, double y, double radius, Cond cond);
+  template<typename Cond>
   std::optional<T> closestAround(double x, double y, double radius, Cond cond);
 private:
+  vector<T>& at(double x, double y, int ox=0, int oy=0);
+  int sx, sy, w, h;
+  double stride;
   vector<vector<T>> grid;
 };
 
@@ -99,12 +117,171 @@ struct DrawContext
 
 struct Zombie
 {
+  Zombie(Player& o):owner(o){}
   Player& owner;
   double px;
   double py;
   double hitpoints;
+  QGraphicsEllipseItem* pixmap;
 };
 using ZombiePtr = std::shared_ptr<Zombie>;
+
+inline QPointF position(ZombiePtr const& z)
+{
+  return QPointF(z->px, z->py);
+}
+
+
+
+
+template<typename T>
+Grid<T>::Grid(int w, int h, double zoneSize)
+:w(w), h(h), stride(zoneSize)
+{
+  sx = ceil((double)w / zoneSize);
+  sy = ceil((double)h / zoneSize);
+  grid.resize(sx*sy);
+}
+template<typename T>
+vector<T>&
+Grid<T>::at(double x, double y, int ox, int oy)
+{
+  static vector<T> empty;
+  int cx = floor(x/stride);
+  int cy = floor(y/stride);
+  cx += ox;
+  cy += oy;
+  if (cx<0 || cy<0 || cx >= sx || cy >= sy)
+    return empty;
+  return grid[cy*sx+cx];
+}
+
+template<typename T>
+void Grid<T>::add(T const& o)
+{
+  auto p = position(o);
+  at(p.x(), p.y()).push_back(o);
+}
+template<typename T>
+void Grid<T>::remove(T const& o)
+{
+  auto p = position(o);
+  at(p.x(), p.y()).swapOut(o);
+}
+template<typename T>
+void Grid<T>::move(T const& o, double x, double y)
+{
+  auto pprev = position(o);
+  auto& vprev = at(pprev.x(), pprev.y());
+  auto& vnew = at(x, y);
+  if (&vnew != &vprev)
+  {
+    vprev.swapOut(o);
+    vnew.push_back(o);
+  }
+}
+template<typename T>
+template<typename Cond>
+int Grid<T>::countAround(double x, double y, double radius, Cond cond)
+{
+  int result = 0;
+  auto consider = [&](vector<T>& v)
+  {
+    for (auto& o: v)
+    {
+      if (norm2(QPointF(x, y)-position(o)) < radius*radius && cond(o))
+        result++;
+    }
+  };
+  auto& v = at(x, y);
+  consider(v);
+  double xs = x/stride;
+  double ys = x/stride;
+  bool xneg =  (xs-floor(xs) <= ceil(xs)-xs);
+  bool yneg = (ys-floor(ys) <= ceil(ys)-ys);
+  consider(at(x,y, xneg? -1:1, 0));
+  consider(at(x, y, 0, yneg? -1:1));
+  consider(at(x,y, xneg? -1:1, yneg? -1:1));
+  return result;
+}
+template<typename T>
+template<typename Cond>
+vector<T> Grid<T>::around(double x, double y, double radius, Cond cond)
+{
+  vector<T> result;
+  auto consider = [&](vector<T>& v)
+  {
+    for (auto& o: v)
+    {
+      if (norm2(QPointF(x, y)-position(o)) < radius*radius && cond(o))
+        result.push_back(o);
+    }
+  };
+  auto& v = at(x, y);
+  consider(v);
+  double xs = x/stride;
+  double ys = x/stride;
+  bool xneg =  (xs-floor(xs) <= ceil(xs)-xs);
+  bool yneg = (ys-floor(ys) <= ceil(ys)-ys);
+  consider(at(x,y, xneg? -1:1, 0));
+  consider(at(x, y, 0, yneg? -1:1));
+  consider(at(x,y, xneg? -1:1, yneg? -1:1));
+  return result;
+}
+template<typename T>
+template<typename Cond>
+std::optional<T> Grid<T>::closestAround(double x, double y, double radius, Cond cond)
+{
+  std::optional<T> result;
+  auto consider = [&](vector<T>& v)
+  {
+    for (auto& o: v)
+    {
+      auto n2 = norm2(QPointF(x, y)-position(o));
+      if (n2 < radius*radius && cond(o)
+        && (!result || norm2(QPointF(x, y)-position(*result)) > n2))
+        result = o;
+    }
+  };
+  auto& v = at(x, y);
+  consider(v);
+  double xs = x/stride;
+  double ys = x/stride;
+  bool xneg =  (xs-floor(xs) <= ceil(xs)-xs);
+  bool yneg = (ys-floor(ys) <= ceil(ys)-ys);
+  consider(at(x,y, xneg? -1:1, 0));
+  consider(at(x, y, 0, yneg? -1:1));
+  consider(at(x,y, xneg? -1:1, yneg? -1:1));
+  return result;
+}
+template<typename T>
+template<typename Cond>
+vector<T> Grid<T>::aroundWide(double x, double y, double radius, Cond cond)
+{
+  vector<T> result;
+  auto consider = [&](vector<T>& v)
+  {
+    for (auto& o: v)
+    {
+      if (norm2(QPointF(x, y)-position(o)) < radius*radius && cond(o))
+        result.push_back(o);
+    }
+  };
+  int minx = floor((x-radius)/stride);
+  int maxx = floor((x+radius)/stride);
+  int miny = floor((y-radius)/stride);
+  int maxy = floor((y+radius)/stride);
+  minx = std::max(minx, 0);
+  miny = std::max(miny, 0);
+  maxx = std::min(sx-1, maxx);
+  maxy = std::min(sy-1, maxy);
+  for (int cx=minx; cx<=maxx; cx++)
+  {
+    for (int cy=miny; cy<=maxy; cy++)
+      consider(grid[cx+cy*sx]);
+  }
+  return result;
+}
 
 using TouchCallback = std::function<void(QEvent::Type, QPointF)>;
 
@@ -129,14 +306,26 @@ struct Building
   double radius;
   double hitpoints;
   QGraphicsPixmapItem* pixmap;
+  // catapult stuff
   TouchCallback onTouch;
   QGraphicsEllipseItem* handle = nullptr;
   QGraphicsEllipseItem* target = nullptr;
   TouchTargePtr handleTouch;
+  // farm stuff
+  Time lastSpawnTime;
 };
 
 using BuildingPtr = std::shared_ptr<Building>;
 
+class ManagedAnimation;
+struct Smoke
+{
+  double px;
+  double py;
+  Time createdAt;
+  std::unique_ptr<ManagedAnimation> animation;
+};
+using SmokePtr = std::shared_ptr<Smoke>;
 
 class Player
 {
@@ -145,6 +334,9 @@ public:
   void onSymbol(int clsidx, QPointF location);
   void spawn(BuildingKind kind, QPointF center);
   void onHandle(BuildingPtr b, QEvent::Type t, QPointF p);
+  void fire(BuildingPtr b, QPointF p);
+  void tick();
+  void spawnZombie(BuildingPtr where);
 private:
   Game& game;
   int index;
@@ -153,6 +345,7 @@ private:
   vector<BuildingPtr> buildings;
   vector<ZombiePtr> zombies;
   vector<TouchTargePtr> targets;
+  vector<SmokePtr> smokes;
   friend class Game;
   friend class GraphicsView;
 };
@@ -165,9 +358,12 @@ public:
   void newDrawing(DrawContext const& ctx);
   void onNetworkTimer();
   void onSymbol(int clsid, QPointF center);
+  void tick();
   QGraphicsScene scene;
   vector<Player> players;
   int w, h;
+  Grid<ZombiePtr>* grid;
+  std::vector<QPixmap*> smoke;
 private:
   int nextIndex = 0;
   struct PendingDraw
@@ -184,7 +380,47 @@ private:
   };
   std::list<PendingDraw> requests;
   QUdpSocket socket;
+  Time lastPlayerTick;
 };
+
+class ManagedAnimation: public QGraphicsPixmapItem
+{
+public:
+  ManagedAnimation(std::vector<QPixmap*> const& assets, int frameTimeMs, double scale)
+  :QGraphicsPixmapItem(*assets[0])
+  , _a(assets)
+  {
+    setScale(scale);
+    _timer = new QTimer();
+    _timer->connect(_timer, &QTimer::timeout, std::bind(&ManagedAnimation::onTimer, this));
+    _timer->setInterval(frameTimeMs);
+    _timer->start();
+  }
+  ~ManagedAnimation()
+  {
+    delete _timer;
+  }
+  void onTimer()
+  {
+    ++_idx;
+    if (_idx >= _a.size())
+    {
+      _idx = 0;
+      /*
+      _timer->stop();
+      delete _timer;
+      _game.scene().removeItem(this);
+      delete this;
+      return;*/
+    }
+    setPixmap(*_a[_idx]);
+  }
+private:
+  const std::vector<QPixmap*>& _a;
+  QTimer* _timer;
+  int _idx;
+};
+
 
 class GraphicsView : public QGraphicsView
 {
@@ -404,6 +640,24 @@ void Game::onSymbol(int clsid, QPointF center)
   }
 }
 
+void Player::fire(BuildingPtr b, QPointF p)
+{
+  auto delta = p-QPointF(b->px, b->py);
+  auto len = sqrt(norm2(delta));
+  delta *= -1.5;
+  auto spos = QPointF(b->px, b->py) + delta;
+  auto smoke = std::make_shared<Smoke>();
+  smoke->px = spos.x();
+  smoke->py = spos.y();
+  smoke->createdAt = now();
+  smoke->animation = std::make_unique<ManagedAnimation>(
+    game.smoke, 100, 1.0);
+  game.scene.addItem(&*smoke->animation);
+  smoke->animation->setOffset(-607/2, -524/2);
+  smoke->animation->setPos(spos);
+  smokes.push_back(smoke);
+}
+
 void Player::onHandle(BuildingPtr b, QEvent::Type t, QPointF p)
 {
   qDebug() << "do something " << t << " " << p;
@@ -414,7 +668,18 @@ void Player::onHandle(BuildingPtr b, QEvent::Type t, QPointF p)
   double angleDeg = anglerad * 180.0 / M_PI;
   b->pixmap->setRotation(angleDeg-90);
   if (t == QEvent::TouchEnd)
+  {
+    auto delta = p-QPointF(b->px, b->py);
+    auto len = sqrt(norm2(delta));
+    if (len > 200)
+      fire(b, p);
+    delta *= 250.0 / len;
+    auto res = delta + QPointF(b->px, b->py);
+    b->handle->setPos(res);
+    b->handleTouch->px = res.x();
+    b->handleTouch->py = res.y();
     game.scene.removeItem(b->target);
+  }
   else
   {
     game.scene.addItem(b->target);
@@ -473,6 +738,13 @@ void Player::onSymbol(int clsid, QPointF center)
       if (norm2(center-QPointF(b.px, b.py)) < b.radius*b.radius)
       {
         delete b.pixmap;
+        if (b.handle != nullptr)
+          delete b.handle;
+        if (b.target != nullptr)
+          delete b.target;
+        if (b.handleTouch)
+          targets.swapOut(b.handleTouch);
+        b.onTouch = nullptr;
         buildings.swapOut(i);
         break;
       }
@@ -480,10 +752,61 @@ void Player::onSymbol(int clsid, QPointF center)
   }
 }
 
+void Player::spawnZombie(BuildingPtr where)
+{
+  auto z = std::make_shared<Zombie>(*this);
+  z->px = where->px;
+  z->py = where->py;
+  z->hitpoints = 1.0;
+  z->pixmap = game.scene.addEllipse(z->px-1, z->py-1, 2, 2, QPen(), QBrush(Qt::black));
+  zombies.push_back(z);
+  game.grid->add(z);
+}
+
+void Player::tick()
+{
+  static const int msSmokeLife = 20000;
+  auto tme = now();
+  for (int i=0; i<smokes.size(); ++i)
+  {
+    auto elapsed = tme - smokes[i]->createdAt;
+    if (elapsed >= std::chrono::milliseconds(msSmokeLife))
+    {
+      smokes.swapOut(i);
+      i--;
+      continue;
+    }
+    auto elapsedMS = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+    double s = 1.0 - (double)elapsedMS/(double)msSmokeLife;
+    smokes[i]->animation->setScale(s);
+  }
+  for (auto& b: buildings)
+  {
+    if (b->kind == BuildingKind::Farm && tme-b->lastSpawnTime > std::chrono::milliseconds(C::zombieSpawnIntervalMs))
+    {
+      spawnZombie(b);
+      b->lastSpawnTime = tme;
+    }
+  }
+}
+
+void Game::tick()
+{
+  auto tme = now();
+  if (tme - lastPlayerTick > std::chrono::milliseconds(100))
+  {
+    lastPlayerTick = tme;
+    for (auto& p: players)
+      p.tick();
+  }
+}
 void Game::run(QApplication& app)
 {
+  for (int i=0; i<=8;i++)
+    smoke.push_back(new QPixmap(("assets/smoka-" + std::to_string(i)+".png").c_str()));
   w = 3840;
   h = 2160;
+  grid = new Grid<ZombiePtr>(w, h, 216);
   float scale = 1;
   GraphicsView* view = new GraphicsView(*this, &scene);
   view->setSceneRect(0,0,w, h);
@@ -497,6 +820,10 @@ void Game::run(QApplication& app)
   players.reserve(2);
   players.emplace_back(0, *this, QRectF(0, 0, w/2, h), false);
   players.emplace_back(1, *this, QRectF(w/2, 0, w, h), false);
+  auto timer = new QTimer();
+  timer->connect(timer, &QTimer::timeout, std::bind(&Game::tick, this));
+  timer->setInterval(20);
+  timer->start();
   app.exec();
 }
 
