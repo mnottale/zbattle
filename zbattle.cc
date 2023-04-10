@@ -51,8 +51,29 @@ enum class BuildingKind
 namespace C
 {
   const int zombieSpawnIntervalMs = 2000;
+  const double zombieMoveSpeed = 100;
+  const double buildingWeight = 5;
+  const double smokeWeight = 1;
+  const int smokeLifeTimeMs = 20000;
+  const double zombieAggroDistance = 200;
+  const double zombieCombatDistance = 8.0;
+  const double zombieSupportDistance = 10.0;
+  const double zombieOverwhelmingSupport = 10.0; // number of z for max support effect
+  const double zombieBaseDmg = 0.9;
+  const double zombieExtraMaxDmg = 0.2;
+  const double zombieHitpoints = 1;
+  const double waveRadius = 400;
+  const double waveDisplacmentFactorMin = 1.2;
+  const double waveDisplacmentFactorMax = 2.5;
+  const int burstZombieCount = 10;
 }
 
+inline double notZero(double v)
+{
+  if (std::abs(v) < 1e-8)
+    return 1e-8;
+  return v;
+}
 template<typename T> class vector: public std::vector<T>
 {
 public:
@@ -114,7 +135,8 @@ struct DrawContext
   vector<QGraphicsLineItem*> parts;
   vector<QPointF> points;
 };
-
+struct Zombie;
+using ZombiePtr = std::shared_ptr<Zombie>;
 struct Zombie
 {
   Zombie(Player& o):owner(o){}
@@ -123,8 +145,8 @@ struct Zombie
   double py;
   double hitpoints;
   QGraphicsEllipseItem* pixmap;
+  ZombiePtr target;
 };
-using ZombiePtr = std::shared_ptr<Zombie>;
 
 inline QPointF position(ZombiePtr const& z)
 {
@@ -359,12 +381,17 @@ public:
   void onNetworkTimer();
   void onSymbol(int clsid, QPointF center);
   void tick();
+  void move(ZombiePtr& z, QPointF pos);
   QGraphicsScene scene;
   vector<Player> players;
   int w, h;
   Grid<ZombiePtr>* grid;
+
+  //assets
   std::vector<QPixmap*> smoke;
+  QColor pColors[4] = {QColor(255,255,0), QColor(255,0,255), QColor(0,255,255), QColor(255,0,0)};
 private:
+  Time lastTick;
   int nextIndex = 0;
   struct PendingDraw
   {
@@ -728,7 +755,7 @@ void Player::onSymbol(int clsid, QPointF center)
   Symbol s = (Symbol)clsid;
   if (s == Symbol::TriUp)
     spawn(BuildingKind::Catapult, center);
-  else if (s == Symbol::House)
+  else if (s == Symbol::Square)
     spawn(BuildingKind::Farm, center);
   else if (s == Symbol::Cross)
   {
@@ -750,6 +777,30 @@ void Player::onSymbol(int clsid, QPointF center)
       }
     }
   }
+  else if (s == Symbol::Peak)
+  {
+    auto affected = game.grid->aroundWide(center.x(), center.y(), C::waveRadius,
+      [] (const ZombiePtr&) { return true;});
+    for (auto& z: affected)
+    {
+      auto d = QPointF(z->px, z->py)-center;
+      double f = (double)(rand()%1000)/1000.0*(C::waveDisplacmentFactorMax-C::waveDisplacmentFactorMin)+C::waveDisplacmentFactorMin;
+      auto np = center + d*f;
+      game.move(z, np);
+    }
+  }
+  else if (s == Symbol::Plus)
+  {
+    for (auto& b: buildings)
+    {
+      if (QRectF(b->px-100, b->py-100, 200, 200).contains(center))
+      {
+        for (int i=0; i<C::burstZombieCount; i++)
+          spawnZombie(b);
+        break;
+      }
+    }
+  }
 }
 
 void Player::spawnZombie(BuildingPtr where)
@@ -757,27 +808,28 @@ void Player::spawnZombie(BuildingPtr where)
   auto z = std::make_shared<Zombie>(*this);
   z->px = where->px;
   z->py = where->py;
-  z->hitpoints = 1.0;
-  z->pixmap = game.scene.addEllipse(z->px-1, z->py-1, 2, 2, QPen(), QBrush(Qt::black));
+  z->hitpoints = C::zombieHitpoints;
+  z->pixmap = game.scene.addEllipse(-3, -3, 6, 6, QPen(game.pColors[index]), QBrush(game.pColors[index]));
+  z->pixmap->setPos(QPointF(z->px, z->py));
+  z->pixmap->setZValue(10);
   zombies.push_back(z);
   game.grid->add(z);
 }
 
 void Player::tick()
 {
-  static const int msSmokeLife = 20000;
   auto tme = now();
   for (int i=0; i<smokes.size(); ++i)
   {
     auto elapsed = tme - smokes[i]->createdAt;
-    if (elapsed >= std::chrono::milliseconds(msSmokeLife))
+    if (elapsed >= std::chrono::milliseconds(C::smokeLifeTimeMs))
     {
       smokes.swapOut(i);
       i--;
       continue;
     }
     auto elapsedMS = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
-    double s = 1.0 - (double)elapsedMS/(double)msSmokeLife;
+    double s = 1.0 - (double)elapsedMS/(double)C::smokeLifeTimeMs;
     smokes[i]->animation->setScale(s);
   }
   for (auto& b: buildings)
@@ -790,15 +842,132 @@ void Player::tick()
   }
 }
 
+struct Target
+{
+  unsigned int playerMask;
+  double px, py;
+  double weight;
+};
+
+void Game::move(ZombiePtr& z, QPointF pos)
+{
+  grid->move(z, pos.x(), pos.y());
+  z->px = pos.x();
+  z->py = pos.y();
+  z->pixmap->setPos(pos);
+}
+
 void Game::tick()
 {
   auto tme = now();
+  double elapsed = (double)std::chrono::duration_cast<std::chrono::microseconds>(tme-lastTick).count()/1000000.0;
+  lastTick = tme;
   if (tme - lastPlayerTick > std::chrono::milliseconds(100))
   {
     lastPlayerTick = tme;
     for (auto& p: players)
       p.tick();
   }
+  // move zombies, precompute target list
+  vector<Target> targets;
+  for (auto&p : players)
+  {
+    for (auto& b: p.buildings)
+    {
+      targets.push_back(Target{.playerMask = ~(1<<p.index), .px=b->px, .py=b->py, .weight = C::buildingWeight});
+    }
+    for (auto& s: p.smokes)
+    {
+      auto ltms = std::chrono::duration_cast<std::chrono::milliseconds>(tme-s->createdAt).count();
+      auto w = C::smokeWeight * (1.0 - (double)ltms / (double)C::smokeLifeTimeMs);
+      targets.push_back(Target{.playerMask = 1 << p.index, .px=s->px, .py=s->py, .weight = w});
+    }
+  }
+  int zcount = 0, zmoved = 0;
+  // move all zombies
+  for (auto&p: players)
+  {
+    for (auto&z: p.zombies)
+    {
+      zcount++;
+      z->target = nullptr;
+      Target* best = nullptr;
+      double bestWeight = 0;
+      for (auto& tgt: targets)
+      {
+        if ((tgt.playerMask & (1 << p.index)) == 0)
+          continue;
+        double w = tgt.weight / notZero(sqrt(norm2(QPointF(tgt.px, tgt.py)-QPointF(z->px, z->py))));
+        if (w > bestWeight)
+        {
+          best = &tgt;
+          bestWeight = w;
+        }
+      }
+      // chek if there is a z nearby
+      auto closest = grid->closestAround(z->px, z->py,  C::zombieAggroDistance,
+        [&](ZombiePtr const& zz) { return &zz->owner != &p;});
+      std::optional<QPointF> go;
+      if (closest)
+      {
+        auto d2 = norm2(QPointF((*closest)->px, (*closest)->py)-QPointF(z->px, z->py));
+        if (d2 <= C::zombieCombatDistance)
+          z->target = *closest;
+        go = QPointF((*closest)->px, (*closest)->py);
+      }
+      else if (best)
+        go = QPointF(best->px, best->py);
+      if (go)
+      {
+        auto v = *go - QPointF(z->px, z->py);
+        auto norm = sqrt(norm2(v));
+        if (norm != 0)
+        {
+          zmoved++;
+          v = v * C::zombieMoveSpeed * elapsed / norm;
+          auto pos = QPointF(z->px, z->py) + v;
+          move(z, pos);
+        }
+      }
+    }
+  }
+  // fight
+  for (auto&p: players)
+  {
+    for (auto&z: p.zombies)
+    {
+      if (z->target == nullptr)
+        continue;
+      // compute supports
+      int zsupp = grid->countAround(z->px, z->py, C::zombieSupportDistance,
+        [&](ZombiePtr const& b) { return &b->owner == &z->owner;});
+      int tsupp = grid->countAround(z->target->px, z->target->py, C::zombieSupportDistance,
+        [&](ZombiePtr const& b) { return &b->owner == &z->target->owner;});
+      int dsup = zsupp-tsupp;
+      double pOffset = (double)dsup/C::zombieOverwhelmingSupport;
+      pOffset = std::max(-1.0, std::min(1.0, pOffset));
+      double base = C::zombieBaseDmg + C::zombieExtraMaxDmg*pOffset/2.0;
+      double bonus = C::zombieExtraMaxDmg;
+      double roll = (double)(rand()% 1000)/1000.0 * bonus + base;
+      z->target->hitpoints -= roll;
+      qDebug() << z->owner.index << "/" << zsupp << " -> " << z->target->owner.index << "/" << tsupp << "  o " << pOffset << "  r " << roll << "  hp " << z->target->hitpoints;
+    }
+  }
+  // bring out your dead!
+  for (auto&p: players)
+  {
+    for (int i=0; i<p.zombies.size(); ++i)
+    {
+      if (p.zombies[i]->hitpoints <= 0)
+      {
+        delete p.zombies[i]->pixmap;
+        grid->remove(p.zombies[i]);
+        p.zombies.swapOut(i);
+        i--;
+      }
+    }
+  }
+  //qDebug() << zcount << " " << zmoved << " " << std::chrono::duration_cast<std::chrono::microseconds>(now()-tme).count();
 }
 void Game::run(QApplication& app)
 {
@@ -824,6 +993,8 @@ void Game::run(QApplication& app)
   timer->connect(timer, &QTimer::timeout, std::bind(&Game::tick, this));
   timer->setInterval(20);
   timer->start();
+  lastTick = now();
+  lastPlayerTick = lastTick;
   app.exec();
 }
 
