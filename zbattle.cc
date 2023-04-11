@@ -59,8 +59,8 @@ namespace C
   const double zombieCombatDistance = 8.0;
   const double zombieSupportDistance = 10.0;
   const double zombieOverwhelmingSupport = 10.0; // number of z for max support effect
-  const double zombieBaseDmg = 0.9;
-  const double zombieExtraMaxDmg = 0.2;
+  const double zombieBaseDmg = 0.7;
+  const double zombieExtraMaxDmg = 0.6;
   const double zombieHitpoints = 1;
   const double waveRadius = 400;
   const double waveDisplacmentFactorMin = 1.2;
