@@ -67,6 +67,9 @@ namespace C
   const double waveDisplacmentFactorMax = 2.5;
   const int burstZombieCount = 10;
   const int hideDurationMs = 8000;
+  const double zombieSpawnSpread = 40;
+  const double zombieExplosionRadius = 8.0;
+  const double zombieExplosionDamage = 0.1;
 }
 
 inline double notZero(double v)
@@ -146,7 +149,6 @@ struct Zombie
   double py;
   double hitpoints;
   QGraphicsEllipseItem* pixmap;
-  ZombiePtr target;
 };
 
 inline QPointF position(ZombiePtr const& z)
@@ -361,6 +363,8 @@ public:
   void fire(BuildingPtr b, QPointF p);
   void tick();
   void spawnZombie(BuildingPtr where);
+  bool operator == (const Player& b) const { return index == b.index;}
+  bool operator != (const Player& b) const { return index != b.index;}
 private:
   Game& game;
   int index;
@@ -672,7 +676,7 @@ void Game::onSymbol(int clsid, QPointF center)
 void Player::fire(BuildingPtr b, QPointF p)
 {
   auto delta = p-QPointF(b->px, b->py);
-  auto len = sqrt(norm2(delta));
+  //auto len = sqrt(norm2(delta));
   delta *= -1.5;
   auto spos = QPointF(b->px, b->py) + delta;
   auto smoke = std::make_shared<Smoke>();
@@ -819,8 +823,8 @@ void Player::onSymbol(int clsid, QPointF center)
 void Player::spawnZombie(BuildingPtr where)
 {
   auto z = std::make_shared<Zombie>(*this);
-  z->px = where->px;
-  z->py = where->py;
+  z->px = where->px + ((double)(rand()%1000)/1000.0-0.5)*C::zombieSpawnSpread*2.0;
+  z->py = where->py + ((double)(rand()%1000)/1000.0-0.5)*C::zombieSpawnSpread*2.0;
   z->hitpoints = C::zombieHitpoints;
   z->pixmap = game.scene.addEllipse(-3, -3, 6, 6, QPen(game.pColors[index]), QBrush(game.pColors[index]));
   z->pixmap->setPos(QPointF(z->px, z->py));
@@ -872,8 +876,10 @@ void Game::move(ZombiePtr& z, QPointF pos)
 
 void Game::tick()
 {
+  static Time globalStart = now();
   auto tme = now();
   double elapsed = (double)std::chrono::duration_cast<std::chrono::microseconds>(tme-lastTick).count()/1000000.0;
+  double frameTime = (double)std::chrono::duration_cast<std::chrono::microseconds>(tme-globalStart).count()/1000000.0;
   lastTick = tme;
   if (tme - lastPlayerTick > std::chrono::milliseconds(100))
   {
@@ -905,7 +911,6 @@ void Game::tick()
     for (auto&z: p.zombies)
     {
       zcount++;
-      z->target = nullptr;
       Target* best = nullptr;
       double bestWeight = 0;
       for (auto& tgt: targets)
@@ -921,13 +926,14 @@ void Game::tick()
       }
       // chek if there is a z nearby
       auto closest = grid->closestAround(z->px, z->py,  C::zombieAggroDistance,
-        [&](ZombiePtr const& zz) { return &zz->owner != &p;});
+        [&](ZombiePtr const& zz) { return zz->owner != p;});
       std::optional<QPointF> go;
       if (closest)
       {
+        // you might be tempted to compute fight target now, in order to
+        // "<<'optimize'>>" but this causes
+        // desequilibrium that advantages player 2
         auto d2 = norm2(QPointF((*closest)->px, (*closest)->py)-QPointF(z->px, z->py));
-        if (d2 <= C::zombieCombatDistance)
-          z->target = *closest;
         go = QPointF((*closest)->px, (*closest)->py);
       }
       else if (best)
@@ -951,23 +957,27 @@ void Game::tick()
   {
     for (auto&z: p.zombies)
     {
-      if (z->target == nullptr)
+      auto closest = grid->closestAround(z->px, z->py,  C::zombieCombatDistance,
+        [&](ZombiePtr const& zz) { return zz->owner != p;});
+      if (!closest)
         continue;
+      auto& target = *closest;
       // compute supports
       int zsupp = grid->countAround(z->px, z->py, C::zombieSupportDistance,
-        [&](ZombiePtr const& b) { return &b->owner == &z->owner;});
-      int tsupp = grid->countAround(z->target->px, z->target->py, C::zombieSupportDistance,
-        [&](ZombiePtr const& b) { return &b->owner == &z->target->owner;});
+        [&](ZombiePtr const& b) { return b->owner == z->owner;});
+      int tsupp = grid->countAround(target->px, target->py, C::zombieSupportDistance,
+        [&](ZombiePtr const& b) { return b->owner == target->owner;});
       int dsup = zsupp-tsupp;
       double pOffset = (double)dsup/C::zombieOverwhelmingSupport;
       pOffset = std::max(-1.0, std::min(1.0, pOffset));
       double base = C::zombieBaseDmg + C::zombieExtraMaxDmg*pOffset/2.0;
       double bonus = C::zombieExtraMaxDmg;
       double roll = (double)(rand()% 1000)/1000.0 * bonus + base;
-      z->target->hitpoints -= roll;
-      qDebug() << z->owner.index << "/" << zsupp << " -> " << z->target->owner.index << "/" << tsupp << "  o " << pOffset << "  r " << roll << "  hp " << z->target->hitpoints;
+      target->hitpoints -= roll;
+      qDebug() << frameTime << " " << z->owner.index << "/" << zsupp << " -> " << target->owner.index << "/" << tsupp << "  o " << pOffset << "  r " << roll << "  hp " << target->hitpoints;
     }
   }
+  std::vector<QPointF> asplosions;
   // bring out your dead!
   for (auto&p: players)
   {
@@ -975,10 +985,25 @@ void Game::tick()
     {
       if (p.zombies[i]->hitpoints <= 0)
       {
+        asplosions.push_back(QPointF(p.zombies[i]->px, p.zombies[i]->py));
         delete p.zombies[i]->pixmap;
         grid->remove(p.zombies[i]);
         p.zombies.swapOut(i);
         i--;
+      }
+    }
+  }
+  for (auto x: asplosions)
+  {
+    auto tgts = grid->around(x.x(), x.y(), C::zombieExplosionRadius, [](ZombiePtr const&){return true;});
+    for (auto& z: tgts)
+    {
+      z->hitpoints -= C::zombieExplosionDamage;
+      if (z->hitpoints <= 0)
+      {
+        delete z->pixmap;
+        grid->remove(z);
+        z->owner.zombies.swapOut(z);
       }
     }
   }
