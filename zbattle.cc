@@ -52,8 +52,8 @@ namespace C
 {
   const int zombieSpawnIntervalMs = 2000;
   const double zombieMoveSpeed = 100;
-  const double buildingWeight = 5;
-  const double smokeWeight = 1;
+  const double buildingWeight = 1;
+  const double smokeWeight = 4;
   const int smokeLifeTimeMs = 20000;
   const double zombieAggroDistance = 200;
   const double zombieCombatDistance = 8.0;
@@ -66,6 +66,7 @@ namespace C
   const double waveDisplacmentFactorMin = 1.2;
   const double waveDisplacmentFactorMax = 2.5;
   const int burstZombieCount = 10;
+  const int hideDurationMs = 8000;
 }
 
 inline double notZero(double v)
@@ -335,6 +336,7 @@ struct Building
   TouchTargePtr handleTouch;
   // farm stuff
   Time lastSpawnTime;
+  Time hiddenUntil;
 };
 
 using BuildingPtr = std::shared_ptr<Building>;
@@ -388,8 +390,8 @@ public:
   Grid<ZombiePtr>* grid;
 
   //assets
-  std::vector<QPixmap*> smoke;
-  QColor pColors[4] = {QColor(255,255,0), QColor(255,0,255), QColor(0,255,255), QColor(255,0,0)};
+  std::vector<QPixmap*> smoke[4];
+  QColor pColors[4] = {QColor(255,0,255), QColor(0,255,255), QColor(255,255,0), QColor(255,0,0)};
 private:
   Time lastTick;
   int nextIndex = 0;
@@ -503,7 +505,7 @@ bool GraphicsView::viewportEvent(QEvent *event)
           DrawContext* hit = nullptr;
           for (auto& ctx: contexts)
           {
-            if ((p-ctx.points.back()).manhattanLength() < 100)
+            if ((p-ctx.points.back()).manhattanLength() < 700)
             {
               hit = &ctx;
             }
@@ -678,7 +680,7 @@ void Player::fire(BuildingPtr b, QPointF p)
   smoke->py = spos.y();
   smoke->createdAt = now();
   smoke->animation = std::make_unique<ManagedAnimation>(
-    game.smoke, 100, 1.0);
+    game.smoke[index], 100, 1.0);
   game.scene.addItem(&*smoke->animation);
   smoke->animation->setOffset(-607/2, -524/2);
   smoke->animation->setPos(spos);
@@ -801,6 +803,17 @@ void Player::onSymbol(int clsid, QPointF center)
       }
     }
   }
+  else if (s == Symbol::Waves)
+  {
+    for (auto& b: buildings)
+    {
+      if (QRectF(b->px-100, b->py-100, 200, 200).contains(center))
+      {
+        b->hiddenUntil = now() + std::chrono::milliseconds(C::hideDurationMs);
+        break;
+      }
+    }
+  }
 }
 
 void Player::spawnZombie(BuildingPtr where)
@@ -874,6 +887,8 @@ void Game::tick()
   {
     for (auto& b: p.buildings)
     {
+      if (b->hiddenUntil > tme)
+        continue;
       targets.push_back(Target{.playerMask = ~(1<<p.index), .px=b->px, .py=b->py, .weight = C::buildingWeight});
     }
     for (auto& s: p.smokes)
@@ -972,7 +987,8 @@ void Game::tick()
 void Game::run(QApplication& app)
 {
   for (int i=0; i<=8;i++)
-    smoke.push_back(new QPixmap(("assets/smoka-" + std::to_string(i)+".png").c_str()));
+    for (int p=0;p<4;p++)
+      smoke[p].push_back(new QPixmap(("assets/smoka-" + std::to_string(i)+"-"+std::to_string(p)+".png").c_str()));
   w = 3840;
   h = 2160;
   grid = new Grid<ZombiePtr>(w, h, 216);
