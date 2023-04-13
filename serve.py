@@ -1,8 +1,6 @@
 # Listens on UDP port 3333
-# Accept request packets of size 1 + imcount*6400
-# byte one is image count
-# followed are grayscale 80x80 image chunks
-# reply is a vector of imcount size with values 0 or 1 depending on the class found
+# Accept request packets of image URLs
+# reply is class index in ascii
 
 
 import torch
