@@ -4,7 +4,7 @@ ZBattle is a two players game for big touchscreen in which you spawn zombies
 and cast spells in order to overwhelm your adversary and destroy his/her zombie
 farms.
 
-[Screenshot|(medias/zbattle.png?raw=true "Screenshot")]
+![Screenshot|(medias/zbattle.png?raw=true "Screenshot")]
 
 ## Warning
 
