@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <vector>
 #include <list>
+#include <algorithm>
 #include <QUdpSocket>
 
 enum class Symbol
@@ -41,15 +42,80 @@ enum class Symbol
   Waves,
 };
 
+static const unsigned int N_SYMBOLS = 15;
+
+const char* symbolNames[] = {
+  "cross", "dslash", "dbackslash", "heart", "house", "losange", "peak", "plus",
+  "spiral", "square", "tornado", "tridown", "triup", "vlines", "waves"
+};
+
+
 enum class BuildingKind
 {
-  Nexus,
   Farm,
   Catapult,
 };
 
+const char* symbolHelp[] = {
+   "destroy one of your buildings",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "shockwave: send Zs flying around",
+   "spawn burst: spawn a burst of Zs on one of your farms",
+   "",
+   "farm: build a farm that spawns Zs regularly",
+   "",
+   "",
+   "catapult: build a catapult to send smoke signals that will attract your Zs",
+   "",
+   "stealth: make one of your buildings invisible to ennemy Zs for a short time",
+};
+
 namespace C
 {
+  const double buildingHitpoints[] = {200, 50};
+  const int symbolCooldownsMs[N_SYMBOLS] = {
+    0, //cross
+    -1,
+    -1,
+    -1, // heart
+    -1, // house
+    -1, // losange
+    10000, // peak
+    15000, // plus
+    -1, // spiral
+    30000, // square
+    -1,  // tornado
+    -1, // tridown
+    8000, // triup
+    -1, // vlines
+    30000, // waves
+  };
+  const double symbolsManaCost[N_SYMBOLS] = {
+    0, //cross
+    -1,
+    -1,
+    -1, // heart
+    -1, // house
+    -1, // losange
+    10, // peak
+    40, // plus
+    -1, // spiral
+    50, // square
+    -1,  // tornado
+    -1, // tridown
+    30, // triup
+    -1, // vlines
+    40, // waves
+  };
+  const std::vector<int> activeSymbols = {0, 6,7,9,12,14};
+  const int farmsTotal = 6;
+  const int farmsLiveMax = 4;
+  const double manaMax = 100;
+  const double manaRegenRate = 1.0;
   const int zombieSpawnIntervalMs = 2000;
   const double zombieMoveSpeed = 100;
   const double buildingWeight = 1;
@@ -331,6 +397,7 @@ struct Building
   double radius;
   double hitpoints;
   QGraphicsPixmapItem* pixmap;
+  QGraphicsRectItem* hpBar;
   // catapult stuff
   TouchCallback onTouch;
   QGraphicsEllipseItem* handle = nullptr;
@@ -356,24 +423,34 @@ using SmokePtr = std::shared_ptr<Smoke>;
 class Player
 {
 public:
-  Player(int index, Game& g, QRectF zone, bool flip);
+  Player(int index, Game& g, QRectF zone, int rotation);
   void onSymbol(int clsidx, QPointF location);
   void spawn(BuildingKind kind, QPointF center);
   void onHandle(BuildingPtr b, QEvent::Type t, QPointF p);
   void fire(BuildingPtr b, QPointF p);
   void tick();
   void spawnZombie(BuildingPtr where);
+  void onAreaClick(QPointF p);
   bool operator == (const Player& b) const { return index == b.index;}
   bool operator != (const Player& b) const { return index != b.index;}
 private:
   Game& game;
   int index;
   QRectF zone;
-  bool flip;
+  int rotation;
   vector<BuildingPtr> buildings;
   vector<ZombiePtr> zombies;
   vector<TouchTargePtr> targets;
   vector<SmokePtr> smokes;
+  Time lastTick;
+  double mana;
+  int farmsRemaining;
+  Time symbolLastUsedTime[N_SYMBOLS];
+  QGraphicsRectItem* cooldownRect[N_SYMBOLS];
+  QGraphicsRectItem* area;
+  QGraphicsRectItem* manaRect;
+  QGraphicsTextItem* helpText;
+  QGraphicsTextItem* farmsCounter;
   friend class Game;
   friend class GraphicsView;
 };
@@ -395,6 +472,7 @@ public:
 
   //assets
   std::vector<QPixmap*> smoke[4];
+  std::vector<QPixmap*> symbols;
   QColor pColors[4] = {QColor(255,0,255), QColor(0,255,255), QColor(255,255,0), QColor(255,0,0)};
 private:
   Time lastTick;
@@ -516,6 +594,17 @@ bool GraphicsView::viewportEvent(QEvent *event)
           }
           if (hit == nullptr)
           {
+            // zone target
+            if (p.x() < 128+50)
+            {
+              game.players[0].onAreaClick(p);
+              return true;
+            }
+            if (p.x() > game.w-128-50)
+            {
+              game.players[1].onAreaClick(p);
+              return true;
+            }
             // priority2: touch targets
             for (auto& player: game.players)
             {
@@ -549,6 +638,7 @@ bool GraphicsView::viewportEvent(QEvent *event)
           hit->points.push_back(p);
           auto pen = QPen();
           pen.setWidth(2);
+          pen.setColor(Qt::red);
           hit->parts.push_back(scene()->addLine(p.x(), p.y(), pp.x(), pp.y(), pen));
           hit->lastTouch = now();
         }
@@ -620,12 +710,62 @@ void DrawContext::cleanup()
     delete p;
 }
 
-Player::Player(int index, Game& g, QRectF zone, bool flip)
+Player::Player(int index, Game& g, QRectF zone, int rotation)
 : game(g)
 , index(index)
 , zone(zone)
-, flip(flip)
-{}
+, rotation(rotation)
+{
+  const int H = 128 + 50;
+  mana = C::manaMax;
+  farmsRemaining = C::farmsTotal;
+  area = game.scene.addRect(0, 0, game.w, H);
+  area->setRotation(rotation);
+  if (rotation == 90)
+    area->setPos(H, 0);
+  else if (rotation == 270)
+    area->setPos(game.w-H, game.h);
+  manaRect = new QGraphicsRectItem(0,0,game.h, 50);
+  manaRect->setBrush(QBrush(Qt::red));
+  manaRect->setParentItem(area);
+  manaRect->setPos(0, H-50);
+  int offset = 0;
+  for (auto i: C::activeSymbols)
+  {
+    auto* q = new QGraphicsPixmapItem(*game.symbols[i]);
+    q->setParentItem(area);
+    q->setScale(4.0);
+    q->setPos(offset*128, 0);
+    auto* cd = new QGraphicsRectItem(0,0,32,32);
+    cd->setBrush(QBrush(QColor(0,255,0,30)));
+    cd->setParentItem(q);
+    cooldownRect[i] = cd;
+    offset++;
+    if (i == (int)Symbol::Square)
+    {
+      farmsCounter = new QGraphicsTextItem(std::to_string(farmsRemaining).c_str());
+      farmsCounter->setParentItem(cd);
+    }
+  }
+  helpText = new QGraphicsTextItem("here is what you can draw, click for help");
+  helpText->setDefaultTextColor(Qt::red);
+  helpText->setParentItem(area);
+  helpText->setPos(0, -50);
+  lastTick = now();
+}
+
+void Player::onAreaClick(QPointF p)
+{
+  int localX = p.y();
+  if (rotation == 270)
+    localX = game.h-localX;
+  int offset = localX / 128;
+  if (offset < C::activeSymbols.size())
+  {
+    auto* text = symbolHelp[C::activeSymbols[offset]];
+    helpText->setPlainText(text);
+  }
+}
 
 void Game::onNetworkTimer()
 {
@@ -733,10 +873,16 @@ void Player::spawn(BuildingKind kind, QPointF center)
   b->px = center.x();
   b->py = center.y();
   b->radius = 150;
-  b->hitpoints = 20;
+  b->hitpoints = C::buildingHitpoints[(int)kind];
   b->pixmap = game.scene.addPixmap(kind == BuildingKind::Farm ? pix_farm : pix_catapult);
   b->pixmap->setOffset(-100, -100);
   b->pixmap->setPos(b->px, b->py);
+  b->pixmap->setRotation(rotation);
+  b->pixmap->setZValue(4);
+  b->hpBar = new QGraphicsRectItem(-100,0,200,25);
+  b->hpBar->setBrush(QBrush(Qt::red));
+  b->hpBar->setZValue(5);
+  b->hpBar->setParentItem(b->pixmap);
   if (kind == BuildingKind::Catapult)
   {
      b->handle = game.scene.addEllipse(-25, -25, 50, 50);
@@ -758,16 +904,51 @@ void Player::spawn(BuildingKind kind, QPointF center)
 void Player::onSymbol(int clsid, QPointF center)
 {
   qDebug() << "Player::onSymbol " << clsid << " " << center;
+  auto cost = C::symbolsManaCost[clsid];
+  if (cost == -1)
+    return;
+  if (mana < cost)
+  {
+    helpText->setPlainText("Not enough mana!");
+    return;
+  }
+  if (now() - symbolLastUsedTime[clsid] < std::chrono::milliseconds(C::symbolCooldownsMs[clsid]))
+  {
+    helpText->setPlainText("spell in cooldown!");
+    return;
+  }
+  auto use = [&,this]() { mana -= cost; symbolLastUsedTime[clsid] = now();};
   Symbol s = (Symbol)clsid;
   if (s == Symbol::TriUp)
+  {
+    use();
     spawn(BuildingKind::Catapult, center);
+  }
   else if (s == Symbol::Square)
-    spawn(BuildingKind::Farm, center);
+  {
+    if (farmsRemaining == 0)
+      helpText->setPlainText("No farm remaining");
+    else
+    {
+      auto has = std::count_if(buildings.begin(), buildings.end(), [](auto const&b) {return b->kind == BuildingKind::Farm;});
+      if (has >= C::farmsLiveMax)
+        helpText->setPlainText("max number of live farms reached");
+      else
+      {
+        use();
+        spawn(BuildingKind::Farm, center);
+        farmsRemaining--;
+        farmsCounter->setPlainText(std::to_string(farmsRemaining).c_str());
+      }
+    }
+  }
   else if (s == Symbol::Cross)
   {
     for (int i=0; i<buildings.size(); i++)
     {
       auto& b = *buildings[i];
+      if (b.kind == BuildingKind::Farm)
+        continue;
       if (norm2(center-QPointF(b.px, b.py)) < b.radius*b.radius)
       {
         delete b.pixmap;
@@ -779,6 +960,7 @@ void Player::onSymbol(int clsid, QPointF center)
           targets.swapOut(b.handleTouch);
         b.onTouch = nullptr;
         buildings.swapOut(i);
+        use();
         break;
       }
     }
@@ -794,6 +976,7 @@ void Player::onSymbol(int clsid, QPointF center)
       auto np = center + d*f;
       game.move(z, np);
     }
+    use();
   }
   else if (s == Symbol::Plus)
   {
@@ -803,6 +986,7 @@ void Player::onSymbol(int clsid, QPointF center)
       {
         for (int i=0; i<C::burstZombieCount; i++)
           spawnZombie(b);
+        use();
         break;
       }
     }
@@ -814,6 +998,7 @@ void Player::onSymbol(int clsid, QPointF center)
       if (QRectF(b->px-100, b->py-100, 200, 200).contains(center))
       {
         b->hiddenUntil = now() + std::chrono::milliseconds(C::hideDurationMs);
+        use();
         break;
       }
     }
@@ -826,7 +1011,7 @@ void Player::spawnZombie(BuildingPtr where)
   z->px = where->px + ((double)(rand()%1000)/1000.0-0.5)*C::zombieSpawnSpread*2.0;
   z->py = where->py + ((double)(rand()%1000)/1000.0-0.5)*C::zombieSpawnSpread*2.0;
   z->hitpoints = C::zombieHitpoints;
-  z->pixmap = game.scene.addEllipse(-3, -3, 6, 6, QPen(game.pColors[index]), QBrush(game.pColors[index]));
+  z->pixmap = game.scene.addEllipse(-5, -5, 10, 10, QPen(game.pColors[index]), QBrush(game.pColors[index]));
   z->pixmap->setPos(QPointF(z->px, z->py));
   z->pixmap->setZValue(10);
   zombies.push_back(z);
@@ -836,6 +1021,31 @@ void Player::spawnZombie(BuildingPtr where)
 void Player::tick()
 {
   auto tme = now();
+  double elapsed = (double)std::chrono::duration_cast<std::chrono::microseconds>(tme-lastTick).count()/1000000.0;
+  lastTick = tme;
+
+  // update mana
+  mana = std::min(C::manaMax, mana + elapsed*C::manaRegenRate);
+  manaRect->setRect(0,0, game.h * mana / C::manaMax, 50);
+  // update cooldowns
+  for (int i: C::activeSymbols)
+  {
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(tme-symbolLastUsedTime[i]).count();
+    if (elapsed > C::symbolCooldownsMs[i])
+    {
+      if (mana >= C::symbolsManaCost[i])
+        cooldownRect[i]->setBrush(QBrush(QColor(0,255,0,25)));
+      else
+        cooldownRect[i]->setBrush(QBrush(QColor(255,0,255,60)));
+    }
+    else
+    {
+      long a = 255- elapsed * 230 / C::symbolCooldownsMs[i];
+      a = std::min(255L, std::max(a, 0L));
+      cooldownRect[i]->setBrush(QBrush(QColor(255,0,0,a)));
+    }
+  }
+  // update smokes
   for (int i=0; i<smokes.size(); ++i)
   {
     auto elapsed = tme - smokes[i]->createdAt;
@@ -1014,12 +1224,15 @@ void Game::run(QApplication& app)
   for (int i=0; i<=8;i++)
     for (int p=0;p<4;p++)
       smoke[p].push_back(new QPixmap(("assets/smoka-" + std::to_string(i)+"-"+std::to_string(p)+".png").c_str()));
+  for (int i=0; i < 15;i++)
+    symbols.push_back(new QPixmap((std::string("assets/") + symbolNames[i] + ".png").c_str())); 
   w = 3840;
   h = 2160;
   grid = new Grid<ZombiePtr>(w, h, 216);
   float scale = 1;
   GraphicsView* view = new GraphicsView(*this, &scene);
   view->setSceneRect(0,0,w, h);
+  scene.addPixmap(QPixmap("assets/bg1.jpg"));
   //view.scale(scale,scale);
   view->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   view->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -1028,8 +1241,8 @@ void Game::run(QApplication& app)
   view->resize(w*scale+1, h*scale+1);
   view->showFullScreen();
   players.reserve(2);
-  players.emplace_back(0, *this, QRectF(0, 0, w/2, h), false);
-  players.emplace_back(1, *this, QRectF(w/2, 0, w, h), false);
+  players.emplace_back(0, *this, QRectF(0, 0, w/2, h), 90);
+  players.emplace_back(1, *this, QRectF(w/2, 0, w, h), 270);
   auto timer = new QTimer();
   timer->connect(timer, &QTimer::timeout, std::bind(&Game::tick, this));
   timer->setInterval(20);
