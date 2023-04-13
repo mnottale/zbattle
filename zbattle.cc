@@ -127,6 +127,7 @@ namespace C
   const double zombieOverwhelmingSupport = 10.0; // number of z for max support effect
   const double zombieBaseDmg = 0.7;
   const double zombieExtraMaxDmg = 0.6;
+  const double zombieStructureDmg = 1.0;
   const double zombieHitpoints = 1;
   const double waveRadius = 400;
   const double waveDisplacmentFactorMin = 1.2;
@@ -583,6 +584,19 @@ bool GraphicsView::viewportEvent(QEvent *event)
         {
           auto p = tp.pos();
           auto pp = tp.lastPos();
+          // priority0: touch targets
+          for (auto& player: game.players)
+          {
+            for (auto& tgt: player.targets)
+            {
+              if (norm2(QPointF(tgt->px, tgt->py)-p) < tgt->radius*tgt->radius)
+              {
+                if (tgt->onTouch)
+                  tgt->onTouch(event->type(), p);
+                return true;
+              }
+            }
+          }
           // priority 1: existing draw context
           DrawContext* hit = nullptr;
           for (auto& ctx: contexts)
@@ -604,19 +618,6 @@ bool GraphicsView::viewportEvent(QEvent *event)
             {
               game.players[1].onAreaClick(p);
               return true;
-            }
-            // priority2: touch targets
-            for (auto& player: game.players)
-            {
-              for (auto& tgt: player.targets)
-              {
-                if (norm2(QPointF(tgt->px, tgt->py)-p) < tgt->radius*tgt->radius)
-                {
-                  if (tgt->onTouch)
-                    tgt->onTouch(event->type(), p);
-                  return true;
-                }
-              }
             }
             // priority3: buildings
             for (auto& player: game.players)
@@ -817,7 +818,7 @@ void Player::fire(BuildingPtr b, QPointF p)
 {
   auto delta = p-QPointF(b->px, b->py);
   //auto len = sqrt(norm2(delta));
-  delta *= -1.5;
+  delta *= -2.5;
   auto spos = QPointF(b->px, b->py) + delta;
   auto smoke = std::make_shared<Smoke>();
   smoke->px = spos.x();
@@ -833,7 +834,6 @@ void Player::fire(BuildingPtr b, QPointF p)
 
 void Player::onHandle(BuildingPtr b, QEvent::Type t, QPointF p)
 {
-  qDebug() << "do something " << t << " " << p;
   b->handle->setPos(p);
   b->handleTouch->px = p.x();
   b->handleTouch->py = p.y();
@@ -844,7 +844,7 @@ void Player::onHandle(BuildingPtr b, QEvent::Type t, QPointF p)
   {
     auto delta = p-QPointF(b->px, b->py);
     auto len = sqrt(norm2(delta));
-    if (len > 200)
+    if (len > 50)
       fire(b, p);
     delta *= 250.0 / len;
     auto res = delta + QPointF(b->px, b->py);
@@ -858,9 +858,9 @@ void Player::onHandle(BuildingPtr b, QEvent::Type t, QPointF p)
     game.scene.addItem(b->target);
     auto delta = p-QPointF(b->px, b->py);
     auto len = sqrt(norm2(delta));
-    delta *= -1.5;
+    delta *= -2.5;
     b->target->setPos(QPointF(b->px, b->py) + delta);
-    b->target->setRect(-len/2, -len/2, len, len);
+    b->target->setRect(-len/4, -len/4, len, len);
   }
 }
 
@@ -872,7 +872,7 @@ void Player::spawn(BuildingKind kind, QPointF center)
   b->kind = kind;
   b->px = center.x();
   b->py = center.y();
-  b->radius = 150;
+  b->radius = 100;
   b->hitpoints = C::buildingHitpoints[(int)kind];
   b->pixmap = game.scene.addPixmap(kind == BuildingKind::Farm ? pix_farm : pix_catapult);
   b->pixmap->setOffset(-100, -100);
@@ -885,18 +885,33 @@ void Player::spawn(BuildingKind kind, QPointF center)
   b->hpBar->setParentItem(b->pixmap);
   if (kind == BuildingKind::Catapult)
   {
-     b->handle = game.scene.addEllipse(-25, -25, 50, 50);
-     b->handle->setPos(center.x()+100, center.y()+250);
-     auto tt = std::make_shared<TouchTarget>();
-     b->handleTouch = tt;
-     auto sp = b->handle->scenePos();
-     tt->px = sp.x();
-     tt->py = sp.y();
-     tt->radius = 25;
-     tt->onTouch = [this, b](QEvent::Type t, QPointF p) { onHandle(b, t, p);};
-     b->target = new QGraphicsEllipseItem(-25, -25, 50, 50);
-     b->target->setPen(QPen(Qt::red));
-     targets.push_back(tt);
+    b->target = new QGraphicsEllipseItem(-25, -25, 50, 50);
+    b->target->setPen(QPen(Qt::red));
+    b->onTouch = [this, bb=&*b] (QEvent::Type etype, QPointF p)
+    {
+      qDebug() << "catatouch " << etype << " " << p;
+      auto it = std::find_if(buildings.begin(), buildings.end(), [&](auto const& c) { return c.get() == bb;});
+      if (it == buildings.end())
+      {
+        qDebug() << "no hit";
+        return;
+      }
+      auto b = *it;
+      if (etype == QEvent::TouchEnd)
+        return;
+      if (b->handle != nullptr)
+        delete b->handle;
+      b->handle = game.scene.addEllipse(-25, -25, 50, 50);
+      b->handle->setPos(p.x(), p.y());
+      auto tt = std::make_shared<TouchTarget>();
+      b->handleTouch = tt;
+      auto sp = b->handle->scenePos();
+      tt->px = sp.x();
+      tt->py = sp.y();
+      tt->radius = 25;
+      tt->onTouch = [this, b](QEvent::Type t, QPointF p) { onHandle(b, t, p);};
+      targets.push_back(tt);
+    };
   }
   buildings.push_back(b);
 }
@@ -926,7 +941,7 @@ void Player::onSymbol(int clsid, QPointF center)
   }
   else if (s == Symbol::Square)
   {
-    if (farmsRemaining == 0)
+    if (farmsRemaining <= 0)
       helpText->setPlainText("No farm remaining");
     else
     {
@@ -1103,7 +1118,7 @@ void Game::tick()
   {
     for (auto& b: p.buildings)
     {
-      if (b->hiddenUntil > tme)
+      if (b->hiddenUntil > tme || b->kind == BuildingKind::Catapult)
         continue;
       targets.push_back(Target{.playerMask = ~(1<<p.index), .px=b->px, .py=b->py, .weight = C::buildingWeight});
     }
@@ -1214,6 +1229,34 @@ void Game::tick()
         delete z->pixmap;
         grid->remove(z);
         z->owner.zombies.swapOut(z);
+      }
+    }
+  }
+  // building damage
+  for (auto& p: players)
+  {
+    for (int i=0; i<p.buildings.size();++i)
+    {
+      auto& b = p.buildings[i];
+      auto zs = grid->countAround(b->px, b->py, b->radius,
+        [&](ZombiePtr const& z) { return b->owner != z->owner;});
+      if (zs)
+      {
+        b->hitpoints -= elapsed * (double)zs * C::zombieStructureDmg;
+        b->hpBar->setRect(-100, 0, 200*b->hitpoints/C::buildingHitpoints[(int)b->kind], 25);
+        if (b->hitpoints <= 0)
+        { // FIXME DUP
+          delete b->pixmap;
+          if (b->handle != nullptr)
+            delete b->handle;
+          if (b->target != nullptr)
+            delete b->target;
+          if (b->handleTouch)
+            p.targets.swapOut(b->handleTouch);
+          b->onTouch = nullptr;
+          p.buildings.swapOut(i);
+          i--;
+        }
       }
     }
   }
