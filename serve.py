@@ -68,8 +68,26 @@ sock.bind(('127.0.0.1', 3333))
 
 while True:
     data, addr = sock.recvfrom(65535)
-    path = data.decode('utf-8')
+    path_rot = data.decode('utf-8')
+    comps = path_rot.split(' ')
+    path = comps[0]
+    rot = int(comps[1])
     image = Image.open(path)
+    if rot != 0:
+        #print('rotating ' + path + ' ' + str(rot))
+        image = image.rotate(angle=rot)
+        # aaaargh, the topleft aligment is sabotaged, fix it
+        ni = np.asarray(image)
+        minx = 1000
+        miny = 1000
+        for y in range(ni.shape[0]):
+            for x in range(ni.shape[1]):
+                if ni[y,x,0] != 255:
+                    minx = min(minx, x)
+                    miny = min(miny, y)
+        image = image.rotate(angle=0, translate=(-minx,-miny), fillcolor=(255,255,255))
+        
+        #image.save(path+'-rotated.png')
     tens = torch.stack([transform(image)])
     outputs = net(tens)
     _, predicted = torch.max(outputs.data, 1)

@@ -136,7 +136,7 @@ namespace C
   const int hideDurationMs = 8000;
   const double zombieSpawnSpread = 40;
   const double zombieExplosionRadius = 8.0;
-  const double zombieExplosionDamage = 0.1;
+  const double zombieExplosionDamage = 0.07;
 }
 
 inline double notZero(double v)
@@ -777,6 +777,16 @@ void Game::onNetworkTimer()
   if (!r.sent)
   {
     auto name = "doodle-" + std::to_string(r.pictureIndex) + ".png";
+    int rotation = 0;
+    for (auto& p: players)
+    {
+      if (p.zone.contains(r.center))
+      {
+        rotation = p.rotation;
+        break;
+      }
+    }
+    name += " " + std::to_string(rotation);
     socket.writeDatagram(name.c_str(), name.length(),
       QHostAddress("127.0.0.1"), 3333);
     r.sent = true;
