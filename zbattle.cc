@@ -120,6 +120,7 @@ namespace C
   const double zombieMoveSpeed = 100;
   const double buildingWeight = 1;
   const double smokeWeight = 4;
+  const double smokeTransientDistance = 10.0;
   const int smokeLifeTimeMs = 20000;
   const double zombieAggroDistance = 200;
   const double zombieCombatDistance = 8.0;
@@ -215,6 +216,7 @@ struct Zombie
   double px;
   double py;
   double hitpoints;
+  unsigned long smokeMask = 0;
   QGraphicsEllipseItem* pixmap;
 };
 
@@ -417,6 +419,10 @@ struct Smoke
   double px;
   double py;
   Time createdAt;
+  double weight;
+  int lifeTimeMs;
+  int smokeBit = -1;
+  bool persist;
   std::unique_ptr<ManagedAnimation> animation;
 };
 using SmokePtr = std::shared_ptr<Smoke>;
@@ -431,7 +437,7 @@ public:
   void fire(BuildingPtr b, QPointF p);
   void tick();
   void spawnZombie(BuildingPtr where);
-  void onAreaClick(QPointF p);
+  void onAreaClick(QEvent::Type t, QPointF p);
   bool operator == (const Player& b) const { return index == b.index;}
   bool operator != (const Player& b) const { return index != b.index;}
 private:
@@ -447,11 +453,18 @@ private:
   double mana;
   int farmsRemaining;
   Time symbolLastUsedTime[N_SYMBOLS];
+  int smokeLifeTimeMs = C::smokeLifeTimeMs;
+  double smokeWeight = C::smokeWeight;
+  bool smokePersist = true;
+  int nextSmokeBit = 0;
   QGraphicsRectItem* cooldownRect[N_SYMBOLS];
   QGraphicsRectItem* area;
   QGraphicsRectItem* manaRect;
   QGraphicsTextItem* helpText;
   QGraphicsTextItem* farmsCounter;
+  QGraphicsTextItem* txtDur;
+  QGraphicsTextItem* txtPwr;
+  QGraphicsTextItem* smokeModeTxt;
   friend class Game;
   friend class GraphicsView;
 };
@@ -589,7 +602,8 @@ bool GraphicsView::viewportEvent(QEvent *event)
           {
             for (auto& tgt: player.targets)
             {
-              if (norm2(QPointF(tgt->px, tgt->py)-p) < tgt->radius*tgt->radius)
+              auto d2 = norm2(QPointF(tgt->px, tgt->py)-p);
+              if (d2 < tgt->radius*tgt->radius)
               {
                 if (tgt->onTouch)
                   tgt->onTouch(event->type(), p);
@@ -611,12 +625,12 @@ bool GraphicsView::viewportEvent(QEvent *event)
             // zone target
             if (p.x() < 128+50)
             {
-              game.players[0].onAreaClick(p);
+              game.players[0].onAreaClick(event->type(), p);
               return true;
             }
             if (p.x() > game.w-128-50)
             {
-              game.players[1].onAreaClick(p);
+              game.players[1].onAreaClick(event->type(), p);
               return true;
             }
             // priority3: buildings
@@ -748,14 +762,43 @@ Player::Player(int index, Game& g, QRectF zone, int rotation)
       farmsCounter->setParentItem(cd);
     }
   }
+  QFont font;
+  font.setPixelSize(80);
+  auto setup = [&](QGraphicsTextItem* txt, int x) {
+    txt->setFont(font);
+    txt->setParentItem(area);
+    txt->setPos(x, 10);
+    txt->setDefaultTextColor(Qt::white);
+  };
+  smokeModeTxt = new QGraphicsTextItem("PER");
+  setup(smokeModeTxt, offset*128);
+  offset++;
+  auto* dplus = new QGraphicsTextItem("D+");
+  setup(dplus, offset*128);
+  offset++;
+  auto* dminus = new QGraphicsTextItem("D-");
+  setup(dminus, offset*128);
+  offset++;
+  auto* pplus = new QGraphicsTextItem("P+");
+  setup(pplus, offset*128);
+  offset++;
+  auto* pminus = new QGraphicsTextItem("P-");
+  setup(pminus, offset*128);
+  offset++;
+  txtDur = new QGraphicsTextItem("dur: 20s");
+  setup(txtDur, offset*128);
+  txtPwr = new QGraphicsTextItem("   pwr: 4");
+  auto r = txtDur->boundingRect();
+  setup(txtPwr, r.right()+10+txtDur->pos().x());
   helpText = new QGraphicsTextItem("here is what you can draw, click for help");
   helpText->setDefaultTextColor(Qt::red);
   helpText->setParentItem(area);
-  helpText->setPos(0, -50);
+  helpText->setPos(0, -100);
+  helpText->setFont(font);
   lastTick = now();
 }
 
-void Player::onAreaClick(QPointF p)
+void Player::onAreaClick(QEvent::Type t, QPointF p)
 {
   int localX = p.y();
   if (rotation == 270)
@@ -765,6 +808,43 @@ void Player::onAreaClick(QPointF p)
   {
     auto* text = symbolHelp[C::activeSymbols[offset]];
     helpText->setPlainText(text);
+  }
+  else if (t != QEvent::TouchEnd)
+    return;
+  else if (offset == C::activeSymbols.size() + 0)
+  { // mode
+    smokePersist = !smokePersist; 
+    smokeModeTxt->setPlainText(smokePersist? "PER" : "TRA");
+  }
+  else if (offset == C::activeSymbols.size() + 1)
+  { // d+
+    if (smokeLifeTimeMs <= 17000)
+      smokeLifeTimeMs += 3000;
+    txtDur->setPlainText(("dur: " + std::to_string(smokeLifeTimeMs/1000) + "s").c_str());
+  }
+  else if (offset == C::activeSymbols.size() + 2)
+  { // d-
+    if (smokeLifeTimeMs > 3000)
+      smokeLifeTimeMs -= 3000;
+    txtDur->setPlainText(("dur: " + std::to_string(smokeLifeTimeMs/1000) + "s").c_str());
+  }
+  else if (offset == C::activeSymbols.size() + 3)
+  { // p+
+    if (smokeWeight < 4)
+      if (smokeWeight < 1)
+        smokeWeight *= 2;
+      else
+        smokeWeight += 1;
+    txtPwr->setPlainText(("   pwr: " + std::to_string(smokeWeight)).c_str());
+  }
+  else if (offset == C::activeSymbols.size() + 4)
+  { // p-
+    if (smokeWeight > 0.1)
+      if (smokeWeight > 1)
+        smokeWeight -= 1;
+      else
+        smokeWeight /= 2;
+    txtPwr->setPlainText(("   pwr: " + std::to_string(smokeWeight)).c_str());
   }
 }
 
@@ -834,6 +914,11 @@ void Player::fire(BuildingPtr b, QPointF p)
   smoke->px = spos.x();
   smoke->py = spos.y();
   smoke->createdAt = now();
+  smoke->weight = smokeWeight;
+  smoke->lifeTimeMs = smokeLifeTimeMs;
+  smoke->smokeBit = smokePersist ? -1 : nextSmokeBit++;
+  if (nextSmokeBit >= 64)
+    nextSmokeBit = 0;
   smoke->animation = std::make_unique<ManagedAnimation>(
     game.smoke[index], 100, 1.0);
   game.scene.addItem(&*smoke->animation);
@@ -895,8 +980,10 @@ void Player::spawn(BuildingKind kind, QPointF center)
   b->hpBar->setParentItem(b->pixmap);
   if (kind == BuildingKind::Catapult)
   {
+    QPen pen(Qt::red);
+    pen.setWidth(4);
     b->target = new QGraphicsEllipseItem(-25, -25, 50, 50);
-    b->target->setPen(QPen(Qt::red));
+    b->target->setPen(pen);
     b->onTouch = [this, bb=&*b] (QEvent::Type etype, QPointF p)
     {
       qDebug() << "catatouch " << etype << " " << p;
@@ -1074,14 +1161,14 @@ void Player::tick()
   for (int i=0; i<smokes.size(); ++i)
   {
     auto elapsed = tme - smokes[i]->createdAt;
-    if (elapsed >= std::chrono::milliseconds(C::smokeLifeTimeMs))
+    if (elapsed >= std::chrono::milliseconds(smokes[i]->lifeTimeMs))
     {
       smokes.swapOut(i);
       i--;
       continue;
     }
     auto elapsedMS = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
-    double s = 1.0 - (double)elapsedMS/(double)C::smokeLifeTimeMs;
+    double s = 1.0 - (double)elapsedMS/(double)smokes[i]->lifeTimeMs;
     smokes[i]->animation->setScale(s);
   }
   for (auto& b: buildings)
@@ -1099,6 +1186,7 @@ struct Target
   unsigned int playerMask;
   double px, py;
   double weight;
+  unsigned long smokeMask = 0;
 };
 
 void Game::move(ZombiePtr& z, QPointF pos)
@@ -1135,8 +1223,8 @@ void Game::tick()
     for (auto& s: p.smokes)
     {
       auto ltms = std::chrono::duration_cast<std::chrono::milliseconds>(tme-s->createdAt).count();
-      auto w = C::smokeWeight * (1.0 - (double)ltms / (double)C::smokeLifeTimeMs);
-      targets.push_back(Target{.playerMask = 1 << p.index, .px=s->px, .py=s->py, .weight = w});
+      auto w = s->weight * (1.0 - (double)ltms / (double)s->lifeTimeMs);
+      targets.push_back(Target{.playerMask = 1 << p.index, .px=s->px, .py=s->py, .weight = w, .smokeMask = 1<<s->smokeBit});
     }
   }
   int zcount = 0, zmoved = 0;
@@ -1152,6 +1240,8 @@ void Game::tick()
       {
         if ((tgt.playerMask & (1 << p.index)) == 0)
           continue;
+        if (tgt.smokeMask & z->smokeMask)
+          continue;
         double w = tgt.weight / notZero(sqrt(norm2(QPointF(tgt.px, tgt.py)-QPointF(z->px, z->py))));
         if (w > bestWeight)
         {
@@ -1159,6 +1249,8 @@ void Game::tick()
           bestWeight = w;
         }
       }
+      if (best != nullptr && bestWeight > best->weight / C::smokeTransientDistance)
+        z->smokeMask |= best->smokeMask;
       // chek if there is a z nearby
       auto closest = grid->closestAround(z->px, z->py,  C::zombieAggroDistance,
         [&](ZombiePtr const& zz) { return zz->owner != p;});
