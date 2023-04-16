@@ -56,6 +56,15 @@ toward them. Touch the catapult and drag opposite to where you want to shoot.
 A red circle will show where the smoke bomb would land. To cancel drag back to
 the center of the catapult and release.
 
+Buttons on your end of the screen give you some control on the smoke effect:
+
+- PER/TRA: persistant or transient smoke. Zs will stay on a persistent smoke,
+but will leave a transient one as soon as they reach the center, and then ignore
+that specific smoke forever
+- D+/D-: change the life time of the smoke
+- P+/P-: change the attractive power of a smoke. For example a value of two means
+Zs will prefer smoke over ennemy farm if the smoke is less than twice as far.
+
 ### Small Hill: shockwave
 
 Sends a shockwave that repulses all zombies by a small distance. Useful to gain
