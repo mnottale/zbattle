@@ -26,8 +26,8 @@
 enum class Symbol
 {
   Cross,
-  DSlash,
   DBackslash,
+  DSlash,
   Heart,
   House,
   Losange,
@@ -45,7 +45,7 @@ enum class Symbol
 static const unsigned int N_SYMBOLS = 15;
 
 const char* symbolNames[] = {
-  "cross", "dslash", "dbackslash", "heart", "house", "losange", "peak", "plus",
+  "cross",  "dbackslash", "dslash","heart", "house", "losange", "peak", "plus",
   "spiral", "square", "tornado", "tridown", "triup", "vlines", "waves"
 };
 
@@ -58,7 +58,7 @@ enum class BuildingKind
 
 const char* symbolHelp[] = {
    "destroy one of your buildings",
-   "",
+   "reconfigure your farm to spawn grouped Zs",
    "",
    "",
    "",
@@ -70,7 +70,7 @@ const char* symbolHelp[] = {
    "",
    "",
    "catapult: build a catapult to send smoke signals that will attract your Zs",
-   "",
+   "speed: produce faster Zs for some time on one farm",
    "stealth: make one of your buildings invisible to ennemy Zs for a short time",
 };
 
@@ -79,7 +79,7 @@ namespace C
   const double buildingHitpoints[] = {200, 50};
   const int symbolCooldownsMs[N_SYMBOLS] = {
     0, //cross
-    -1,
+    30000, // dbackslash
     -1,
     -1, // heart
     -1, // house
@@ -91,12 +91,12 @@ namespace C
     -1,  // tornado
     -1, // tridown
     8000, // triup
-    -1, // vlines
+    15000, // vlines
     30000, // waves
   };
   const double symbolsManaCost[N_SYMBOLS] = {
     0, //cross
-    -1,
+    35,
     -1,
     -1, // heart
     -1, // house
@@ -107,11 +107,11 @@ namespace C
     50, // square
     -1,  // tornado
     -1, // tridown
-    30, // triup
-    -1, // vlines
+    10, // triup
+    20, // vlines
     40, // waves
   };
-  const std::vector<int> activeSymbols = {0, 6,7,9,12,14};
+  const std::vector<int> activeSymbols = {0,1,6,7,9,12,13,14};
   const int farmsTotal = 6;
   const int farmsLiveMax = 4;
   const double manaMax = 100;
@@ -138,6 +138,11 @@ namespace C
   const double zombieSpawnSpread = 40;
   const double zombieExplosionRadius = 8.0;
   const double zombieExplosionDamage = 0.07;
+  const int groupedSpawnFactor = 3;
+  const int groupedDurationMs = 19000;
+  const double zombieSpeedupFactor = 2.0;
+  const int zombieSpeedupDurationMs = 20000;
+  const double defaultSmokeRadius = 1000;
 }
 
 inline double notZero(double v)
@@ -211,11 +216,12 @@ struct Zombie;
 using ZombiePtr = std::shared_ptr<Zombie>;
 struct Zombie
 {
-  Zombie(Player& o):owner(o){}
+  Zombie(Player& o):owner(o){speed = C::zombieMoveSpeed;}
   Player& owner;
   double px;
   double py;
   double hitpoints;
+  double speed;
   unsigned long smokeMask = 0;
   QGraphicsEllipseItem* pixmap;
 };
@@ -405,10 +411,16 @@ struct Building
   TouchCallback onTouch;
   QGraphicsEllipseItem* handle = nullptr;
   QGraphicsEllipseItem* target = nullptr;
+  QGraphicsEllipseItem* radiusPlusCtrl = nullptr;
+  QGraphicsEllipseItem* radiusMinusCtrl = nullptr;
+  TouchTargePtr handleTouchPlus, handleTouchMinus;
+  double targetRadius = C::defaultSmokeRadius;
   TouchTargePtr handleTouch;
   // farm stuff
   Time lastSpawnTime;
   Time hiddenUntil;
+  Time groupUntil;
+  Time speedupUntil;
 };
 
 using BuildingPtr = std::shared_ptr<Building>;
@@ -423,6 +435,7 @@ struct Smoke
   int lifeTimeMs;
   int smokeBit = -1;
   bool persist;
+  double radius;
   std::unique_ptr<ManagedAnimation> animation;
 };
 using SmokePtr = std::shared_ptr<Smoke>;
@@ -434,9 +447,9 @@ public:
   void onSymbol(int clsidx, QPointF location);
   void spawn(BuildingKind kind, QPointF center);
   void onHandle(BuildingPtr b, QEvent::Type t, QPointF p);
-  void fire(BuildingPtr b, QPointF p);
+  void fire(BuildingPtr b, QPointF p, double radius);
   void tick();
-  void spawnZombie(BuildingPtr where);
+  void spawnZombie(BuildingPtr where, int count = 1);
   void onAreaClick(QEvent::Type t, QPointF p);
   bool operator == (const Player& b) const { return index == b.index;}
   bool operator != (const Player& b) const { return index != b.index;}
@@ -904,16 +917,17 @@ void Game::onSymbol(int clsid, QPointF center)
   }
 }
 
-void Player::fire(BuildingPtr b, QPointF p)
+void Player::fire(BuildingPtr b, QPointF p, double radius)
 {
   auto delta = p-QPointF(b->px, b->py);
   //auto len = sqrt(norm2(delta));
-  delta *= -2.5;
+  delta *= -3.5; // duplicated const
   auto spos = QPointF(b->px, b->py) + delta;
   auto smoke = std::make_shared<Smoke>();
   smoke->px = spos.x();
   smoke->py = spos.y();
   smoke->createdAt = now();
+  smoke->radius = radius;
   smoke->weight = smokeWeight;
   smoke->lifeTimeMs = smokeLifeTimeMs;
   smoke->smokeBit = smokePersist ? -1 : nextSmokeBit++;
@@ -935,27 +949,39 @@ void Player::onHandle(BuildingPtr b, QEvent::Type t, QPointF p)
   auto anglerad = atan2(p.y()-b->py, p.x()-b->px);
   double angleDeg = anglerad * 180.0 / M_PI;
   b->pixmap->setRotation(angleDeg-90);
+  auto pp = b->radiusPlusCtrl->scenePos();
+  b->handleTouchPlus->px = pp.x();
+  b->handleTouchPlus->py = pp.y();
+  pp = b->radiusMinusCtrl->scenePos();
+  b->handleTouchMinus->px = pp.x();
+  b->handleTouchMinus->py = pp.y();
   if (t == QEvent::TouchEnd)
   {
     auto delta = p-QPointF(b->px, b->py);
     auto len = sqrt(norm2(delta));
     if (len > 50)
-      fire(b, p);
+      fire(b, p, b->targetRadius);
     delta *= 250.0 / len;
     auto res = delta + QPointF(b->px, b->py);
     b->handle->setPos(res);
     b->handleTouch->px = res.x();
     b->handleTouch->py = res.y();
     game.scene.removeItem(b->target);
+    game.scene.removeItem(b->radiusPlusCtrl);
+    game.scene.removeItem(b->radiusMinusCtrl);
+    targets.swapOut(b->handleTouch);
+    targets.swapOut(b->handleTouchMinus);
+    targets.swapOut(b->handleTouchPlus);
   }
   else
   {
-    game.scene.addItem(b->target);
+    if (b->target->scene() == nullptr)
+      game.scene.addItem(b->target);
     auto delta = p-QPointF(b->px, b->py);
     auto len = sqrt(norm2(delta));
-    delta *= -2.5;
+    delta *= -3.5;
     b->target->setPos(QPointF(b->px, b->py) + delta);
-    b->target->setRect(-len/4, -len/4, len, len);
+    b->target->setRect(-b->targetRadius, -b->targetRadius, b->targetRadius*2, b->targetRadius*2);
   }
 }
 
@@ -1000,6 +1026,26 @@ void Player::spawn(BuildingKind kind, QPointF center)
         delete b->handle;
       b->handle = game.scene.addEllipse(-25, -25, 50, 50);
       b->handle->setPos(p.x(), p.y());
+      b->radiusPlusCtrl = new QGraphicsEllipseItem(-30, -30, 60, 60);
+      b->radiusPlusCtrl->setBrush(QBrush(Qt::red));
+      b->radiusPlusCtrl->setParentItem(b->pixmap);
+      b->radiusPlusCtrl->setPos(QPointF(-40, 100));
+      b->radiusMinusCtrl = new QGraphicsEllipseItem(-30, -30, 60, 60);
+      b->radiusMinusCtrl->setBrush(QBrush(Qt::green));
+      b->radiusMinusCtrl->setParentItem(b->pixmap);
+      b->radiusMinusCtrl->setPos(QPointF(40, 100));
+      auto cttp = std::make_shared<TouchTarget>();
+      auto pp = b->radiusPlusCtrl->scenePos();
+      cttp->px = pp.x();
+      cttp->py = pp.y();
+      cttp->radius = 60;
+      cttp->onTouch = [this, b](QEvent::Type, QPointF) { b->targetRadius *= 1.05;b->target->setRect(-b->targetRadius, -b->targetRadius, b->targetRadius*2, b->targetRadius*2);};
+      auto cttm = std::make_shared<TouchTarget>();
+      pp = b->radiusMinusCtrl->scenePos();
+      cttm->px = pp.x();
+      cttm->py = pp.y();
+      cttm->radius = 60;
+      cttm->onTouch = [this, b](QEvent::Type, QPointF) { b->targetRadius *= 0.95;b->target->setRect(-b->targetRadius, -b->targetRadius, b->targetRadius*2, b->targetRadius*2);};
       auto tt = std::make_shared<TouchTarget>();
       b->handleTouch = tt;
       auto sp = b->handle->scenePos();
@@ -1008,6 +1054,11 @@ void Player::spawn(BuildingKind kind, QPointF center)
       tt->radius = 25;
       tt->onTouch = [this, b](QEvent::Type t, QPointF p) { onHandle(b, t, p);};
       targets.push_back(tt);
+      targets.push_back(cttp);
+      targets.push_back(cttm);
+      b->handleTouchPlus = cttp;
+      b->handleTouchMinus = cttm;
+      auto rt = std::make_shared<TouchTarget>();
     };
   }
   buildings.push_back(b);
@@ -1115,19 +1166,50 @@ void Player::onSymbol(int clsid, QPointF center)
       }
     }
   }
+  else if (s == Symbol::DBackslash)
+  {
+    for (auto& b: buildings)
+    {
+      if (QRectF(b->px-100, b->py-100, 200, 200).contains(center))
+      {
+        b->groupUntil = now() + std::chrono::milliseconds(C::groupedDurationMs);
+        use();
+        break;
+      }
+    }
+  }
+  else if (s == Symbol::VLines)
+  {
+    for (auto& b: buildings)
+    {
+      if (QRectF(b->px-100, b->py-100, 200, 200).contains(center))
+      {
+        b->speedupUntil = now() + std::chrono::milliseconds(C::zombieSpeedupDurationMs);
+        use();
+        break;
+      }
+    }
+  }
 }
 
-void Player::spawnZombie(BuildingPtr where)
+void Player::spawnZombie(BuildingPtr where, int count)
 {
-  auto z = std::make_shared<Zombie>(*this);
-  z->px = where->px + ((double)(rand()%1000)/1000.0-0.5)*C::zombieSpawnSpread*2.0;
-  z->py = where->py + ((double)(rand()%1000)/1000.0-0.5)*C::zombieSpawnSpread*2.0;
-  z->hitpoints = C::zombieHitpoints;
-  z->pixmap = game.scene.addEllipse(-5, -5, 10, 10, QPen(game.pColors[index]), QBrush(game.pColors[index]));
-  z->pixmap->setPos(QPointF(z->px, z->py));
-  z->pixmap->setZValue(10);
-  zombies.push_back(z);
-  game.grid->add(z);
+  auto x = where->px + ((double)(rand()%1000)/1000.0-0.5)*C::zombieSpawnSpread*2.0;
+  auto y = where->py + ((double)(rand()%1000)/1000.0-0.5)*C::zombieSpawnSpread*2.0;
+  for (int i=0;i<count;i++)
+  {
+    auto z = std::make_shared<Zombie>(*this);
+    if (where->speedupUntil > now())
+      z->speed *= C::zombieSpeedupFactor;
+    z->px = x;
+    z->py = y;
+    z->hitpoints = C::zombieHitpoints;
+    z->pixmap = game.scene.addEllipse(-5, -5, 10, 10, QPen(game.pColors[index]), QBrush(game.pColors[index]));
+    z->pixmap->setPos(QPointF(z->px, z->py));
+    z->pixmap->setZValue(10);
+    zombies.push_back(z);
+    game.grid->add(z);
+  }
 }
 
 void Player::tick()
@@ -1173,10 +1255,16 @@ void Player::tick()
   }
   for (auto& b: buildings)
   {
-    if (b->kind == BuildingKind::Farm && tme-b->lastSpawnTime > std::chrono::milliseconds(C::zombieSpawnIntervalMs))
+    if (b->kind == BuildingKind::Farm)
     {
-      spawnZombie(b);
-      b->lastSpawnTime = tme;
+      int f = 1;
+      if (tme < b->groupUntil)
+        f = C::groupedSpawnFactor;
+      if (tme-b->lastSpawnTime > std::chrono::milliseconds(C::zombieSpawnIntervalMs * f))
+      {
+        spawnZombie(b, f);
+        b->lastSpawnTime = tme;
+      }
     }
   }
 }
@@ -1186,6 +1274,7 @@ struct Target
   unsigned int playerMask;
   double px, py;
   double weight;
+  double radius;
   unsigned long smokeMask = 0;
 };
 
@@ -1218,13 +1307,13 @@ void Game::tick()
     {
       if (b->hiddenUntil > tme || b->kind == BuildingKind::Catapult)
         continue;
-      targets.push_back(Target{.playerMask = ~(1<<p.index), .px=b->px, .py=b->py, .weight = C::buildingWeight});
+      targets.push_back(Target{.playerMask = ~(1<<p.index), .px=b->px, .py=b->py, .weight = C::buildingWeight, .radius=-1});
     }
     for (auto& s: p.smokes)
     {
       auto ltms = std::chrono::duration_cast<std::chrono::milliseconds>(tme-s->createdAt).count();
       auto w = s->weight * (1.0 - (double)ltms / (double)s->lifeTimeMs);
-      targets.push_back(Target{.playerMask = 1 << p.index, .px=s->px, .py=s->py, .weight = w, .smokeMask = 1<<s->smokeBit});
+      targets.push_back(Target{.playerMask = 1 << p.index, .px=s->px, .py=s->py, .weight = w, .radius=s->radius, .smokeMask = s->smokeBit == -1 ? 0 : (1<<s->smokeBit)});
     }
   }
   int zcount = 0, zmoved = 0;
@@ -1242,7 +1331,10 @@ void Game::tick()
           continue;
         if (tgt.smokeMask & z->smokeMask)
           continue;
-        double w = tgt.weight / notZero(sqrt(norm2(QPointF(tgt.px, tgt.py)-QPointF(z->px, z->py))));
+        double d2 = norm2(QPointF(tgt.px, tgt.py)-QPointF(z->px, z->py));
+        if (tgt.radius > 0 && d2 > tgt.radius*tgt.radius)
+          continue;
+        double w = tgt.weight / notZero(sqrt(d2));
         if (w > bestWeight)
         {
           best = &tgt;
@@ -1272,7 +1364,7 @@ void Game::tick()
         if (norm != 0)
         {
           zmoved++;
-          v = v * C::zombieMoveSpeed * elapsed / norm;
+          v = v * z->speed * elapsed / norm;
           auto pos = QPointF(z->px, z->py) + v;
           move(z, pos);
         }
